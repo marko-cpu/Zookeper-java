@@ -1,5 +1,6 @@
 package rs.raf.pds.faulttolerance;
 
+import java.util.ArrayList;
 import java.util.List;
 
 import org.apache.zookeeper.KeeperException;
@@ -12,7 +13,7 @@ import rs.raf.pds.faulttolerance.gRPC.AccountRequestType;
 import rs.raf.pds.faulttolerance.gRPC.AccountResponse;
 import rs.raf.pds.faulttolerance.gRPC.AccountServiceGrpc;
 import rs.raf.pds.faulttolerance.gRPC.RequestStatus;
-import rs.raf.pds.zookeeper.core.SyncPrimitive;
+import rs.raf.pds.faulttolerance.core.SyncPrimitive;
 
 public class AppClient extends SyncPrimitive {
 
@@ -22,6 +23,9 @@ public class AppClient extends SyncPrimitive {
 
 	ManagedChannel channel = null;
 	AccountServiceGrpc.AccountServiceBlockingStub blockingStub = null;
+
+	AccountServiceGrpc.AccountServiceBlockingStub followerBlockingStub = null;
+	List<String> list = new ArrayList<>();
 
 	protected AppClient(String zkAddress, String appRoot) throws KeeperException, InterruptedException {
 		super(zkAddress);
@@ -36,9 +40,15 @@ public class AppClient extends SyncPrimitive {
 			e.printStackTrace();
 		}
 	}
+
+	/**
+	 * Check is leader is active.
+	 * Checks the client no recognizes the leader.
+	 * If it doesn't recognize the leader, it tries to find a new leader.
+	 * **/
 	public synchronized void checkLeader() throws KeeperException, InterruptedException {
 		//Thread.sleep(100);
-		List<String> list = zk.getChildren(appRoot, false);
+		list = zk.getChildren(appRoot, false);
 		System.out.println("There are total:"+list.size()+ " replicas for elections!");
 		for (int i=0; i<list.size(); i++)
 			System.out.print("NODE:"+list.get(i)+", ");
@@ -62,15 +72,78 @@ public class AppClient extends SyncPrimitive {
 				byte[] b = zk.getData(appRoot + "/" + leaderNodeName, true, null);
 				leaderHostNamePort = new String(b);
 
-				System.out.println("Leader je "+leaderNodeName);
+				System.out.println("Leader je " + leaderNodeName);
 
-				//if (channel != null)
-				//	channel.shutdown();
+				// Check if the leader is active
+				boolean isLeaderActive = isLeaderActive(leaderHostNamePort);
+				if (!isLeaderActive) {
+					System.out.println("Leader is not active yet. Waiting...");
 
-				blockingStub = getBlockingStub(leaderHostNamePort);
+					Thread.sleep(3000);
+					checkLeader();
+				}
+				else {
+					// leader is active. Create a blocking stub
+					blockingStub = getBlockingStub(leaderHostNamePort);
+				}
+
+			}
+			for (String nodeName : list) {
+				if (!nodeName.equals(leaderNodeName)) {
+					byte[] followerData = zk.getData(appRoot + "/" + nodeName, true, null);
+					String followerHostNamePort = new String(followerData);
+					// Create a blocking stub for each follower
+					followerBlockingStub = getBlockingStub(followerHostNamePort);
+					// Send a request to each follower
+
+				}
+			}
+
+		}
+	}
+
+
+	/**
+	 * Check if leader is active.
+	 * **/
+	private boolean isLeaderActive(String leaderHostNamePort) {
+		ManagedChannel channel = null;
+		try {
+			String[] splits = leaderHostNamePort.split(":");
+			channel = ManagedChannelBuilder.forAddress(splits[0], Integer.parseInt(splits[1]))
+					.usePlaintext()
+					.build();
+
+			AccountServiceGrpc.AccountServiceBlockingStub blockingStub = AccountServiceGrpc.newBlockingStub(channel);
+
+			// Attempt to send some request to the leader, e.g., getAmount
+			AccountRequest request = AccountRequest.newBuilder()
+					.setRequestId(1)
+					.setOpType(AccountRequestType.GET)
+					.build();
+
+			AccountResponse response = blockingStub.getAmount(request);
+
+			// Check if the response came from the leader and if the response is correct
+			if (response != null && response.getStatus() == RequestStatus.STATUS_OK) {
+				System.out.println("Leader is active.");
+				return true;
+			} else {
+				System.out.println("Leader is not active.");
+				return false;
+			}
+		} catch (Exception e) {
+			System.out.println("Error while checking leader activity: " + e.getMessage());
+			return false;
+		} finally {
+			// Ensure proper shutdown of the channel
+			if (channel != null) {
+				channel.shutdown();
 			}
 		}
 	}
+
+
 	public  AccountServiceGrpc.AccountServiceBlockingStub getBlockingStub(String hostNamePort){
 		String[] splits = hostNamePort.split(":");
 		channel = ManagedChannelBuilder.forAddress(splits[0], Integer.parseInt(splits[1]))
@@ -107,7 +180,7 @@ public class AppClient extends SyncPrimitive {
 	public static void main(String[] args) {
 
 		if (args.length != 1) {
-			System.out.println("Usage java -cp PDS-FT1-1.0.jar;.;lib/* rs.raf.pds.faulttolerance.AppClient <zookeeper_server_host:port>");
+			System.out.println("Usage java -cp 'target/PDS-FT1-1.0.jar:target/classes:target/lib/*' rs.raf.pds.faulttolerance.AppClient localhost:2181");
 			System.exit(1);
 		}
 
@@ -127,9 +200,8 @@ public class AppClient extends SyncPrimitive {
 
 	}
 
-
 	private void inviteServerFunctions(AccountServiceGrpc.AccountServiceBlockingStub blockingStub) {
-		// Poziv AppServer-a preko gRPC-a
+		// Calling AppServer's over GRPC
 		System.out.println("Prvi poziv je getAmount()");
 		AccountRequest request = AccountRequest.newBuilder()
 				.setRequestId(1)
@@ -137,13 +209,42 @@ public class AppClient extends SyncPrimitive {
 				.build();
 
 		AccountResponse response;
+		AccountResponse[] followerResponses;
 
 		synchronized(this) {
 			response = blockingStub.getAmount(request);
+
+			// Initialize followerResponses array
+			// 1 less becase leader is not a follower
+			followerResponses = new AccountResponse[list.size() - 1];
+
+			int followerIndex = 0;
+
+
+			for (String followerNodeName : list) {
+				if (!followerNodeName.equals(leaderNodeName)) {
+
+					AccountRequest followerRequest = AccountRequest.newBuilder()
+							.setRequestId(1)
+							.setOpType(AccountRequestType.GET)
+							.build();
+
+
+					AccountResponse followerResponse = followerBlockingStub.getAmount(followerRequest);
+
+
+					followerResponses[followerIndex++] = followerResponse;
+				}
+			}
 		}
+
+
 		ispisResponse(response, request);
 
 
+		for (AccountResponse followerResponse : followerResponses) {
+			ispisResponse(followerResponse, request);
+		}
 
 		System.out.println("Drugi poziv je addAmount()");
 		request = AccountRequest.newBuilder()
@@ -156,12 +257,10 @@ public class AppClient extends SyncPrimitive {
 		}
 		ispisResponse(response, request);
 
-
-
-		System.out.println("Treci poziv je witdrawAmount()");
+		System.out.println("Treci poziv je withdrawAmount()");
 		request = AccountRequest.newBuilder()
-				.setRequestId(2)
-				.setOpType(AccountRequestType.ADD)
+				.setRequestId(3)
+				.setOpType(AccountRequestType.WITDRAWAL)
 				.setAmount(70.0f)
 				.build();
 
@@ -170,11 +269,10 @@ public class AppClient extends SyncPrimitive {
 		}
 		ispisResponse(response, request);
 
-
-		System.out.println("Cetvrti poziv je witdrawAmount()");
+		System.out.println("Cetvrti poziv je withdrawAmount()");
 		request = AccountRequest.newBuilder()
-				.setRequestId(2)
-				.setOpType(AccountRequestType.ADD)
+				.setRequestId(4)
+				.setOpType(AccountRequestType.WITDRAWAL)
 				.setAmount(100.0f)
 				.build();
 		synchronized(this) {
@@ -182,6 +280,7 @@ public class AppClient extends SyncPrimitive {
 		}
 		ispisResponse(response, request);
 	}
+
 
 	public static void ispisResponse(AccountResponse response, AccountRequest request) {
 		if (response.getStatus() == RequestStatus.STATUS_OK) {

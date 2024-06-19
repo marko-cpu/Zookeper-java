@@ -1,1 +1,1 @@
-java -cp 'PDS-FT1-1.0.jar:.:lib/*' rs.raf.pds.faulttolerance.AppClient localhost:2181
+java -cp 'target/PDS-FT1-1.0.jar:target/classes:target/lib/*' rs.raf.pds.faulttolerance.AppClient localhost:2181

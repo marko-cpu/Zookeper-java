@@ -6,15 +6,15 @@ option java_package = "rs.raf.pds.faulttolerance.gRPC";
 service AccountService {
 
 	rpc AddAmount(AccountRequest) returns (AccountResponse) {}
-	
+
 	rpc WitdrawAmount(AccountRequest) returns (AccountResponse) {}
-	
+
 	rpc GetAmount(AccountRequest) returns (AccountResponse) {}
-	
+
 	rpc AppendLog(LogEntry) returns (LogResponse) {}
-	
+
 	rpc GetLeaderInfo(LeaderRequest) returns (LeaderInfo){}
-	
+
 }
 
 enum AccountRequestType {
@@ -30,15 +30,15 @@ message AccountRequest {
 }
 
 enum RequestStatus {
-  STATUS_OK = 0;
-  UPDATE_REJECTED_NOT_LEADER = 1;
-  WITDRAWAL_REJECT_NOT_SUFFICIENT_AMOUNT = 2;
+	STATUS_OK = 0;
+	UPDATE_REJECTED_NOT_LEADER = 1;
+	WITDRAWAL_REJECT_NOT_SUFFICIENT_AMOUNT = 2;
 }
 
 message AccountResponse {
- 	RequestStatus status = 1;
- 	int32 request_id = 2;
-  	optional float balance = 3;
+	RequestStatus status = 1;
+	int32 request_id = 2;
+	optional float balance = 3;
 	optional string message = 4;
 }
 
@@ -49,7 +49,7 @@ message LogEntry {
 
 enum LogStatus {
 	LOG_OK = 0;
-	IO_ERROR = 1; 
+	IO_ERROR = 1;
 	LOG_HASNT_LAST_ENTRY = 2;
 }
 message LogResponse {

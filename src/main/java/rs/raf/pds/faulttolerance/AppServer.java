@@ -1,11 +1,12 @@
 package rs.raf.pds.faulttolerance;
 
-import java.io.IOException;
+import java.io.*;
 import java.net.InetAddress;
 import java.util.Collections;
 import java.util.List;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 
 import org.apache.zookeeper.CreateMode;
 import org.apache.zookeeper.KeeperException;
@@ -20,7 +21,7 @@ import io.grpc.Server;
 import io.grpc.ServerBuilder;
 import rs.raf.pds.faulttolerance.gRPC.AccountServiceGrpc;
 import rs.raf.pds.faulttolerance.gRPC.LogEntry;
-import rs.raf.pds.zookeeper.core.SyncPrimitive;
+import rs.raf.pds.faulttolerance.core.SyncPrimitive;
 
 public class AppServer extends SyncPrimitive implements Runnable, ReplicatedLog.LogReplicator{
 
@@ -34,7 +35,7 @@ public class AppServer extends SyncPrimitive implements Runnable, ReplicatedLog.
 	int myId = -1;
 	volatile Role myRole = Role.FOLLOWER;
 	final String myGRPCAddress;
-	Map<String, FollowerGRPCChannel> followersChannelMap = new HashMap<String, FollowerGRPCChannel>();
+	static Map<String, FollowerGRPCChannel> followersChannelMap = new HashMap<String, FollowerGRPCChannel>();
 	String leaaderGRPCAddress = null;
 
 	volatile boolean running = false;
@@ -172,6 +173,79 @@ public class AppServer extends SyncPrimitive implements Runnable, ReplicatedLog.
 		checkReplicaCandidate();
 	}
 
+	/**
+	 * Sends logs to a follower
+	 */
+	public static void sendLogs(String followerAddress, String logFileName) {
+		try (FileInputStream fis = new FileInputStream(logFileName);
+			 FileOutputStream fos = new FileOutputStream(logFileName, true)) {
+
+			byte[] buffer = new byte[1024];
+			int bytesRead;
+			while ((bytesRead = fis.read(buffer)) != -1) {
+				ByteString logData = ByteString.copyFrom(buffer, 0, bytesRead);
+				LogEntry logEntry = LogEntry.newBuilder()
+						.setLogEntryData(logData)
+						.build();
+				ManagedChannel channel = ManagedChannelBuilder.forTarget(followerAddress)
+						.usePlaintext()
+						.build();
+				AccountServiceGrpc.AccountServiceBlockingStub stub = AccountServiceGrpc.newBlockingStub(channel);
+				stub.appendLog(logEntry);
+				channel.shutdown().awaitTermination(5000, TimeUnit.MILLISECONDS);
+			}
+		} catch (IOException | InterruptedException e) {
+			e.printStackTrace();
+		}
+	}
+
+
+
+/**
+ * Initialize server state by replaying the log
+ * **/
+private void initializeFromLog(String logFileName) {
+	System.out.println("Initializing from log file: " + logFileName);
+	try (BufferedReader reader = new BufferedReader(new FileReader(logFileName))) {
+		String line;
+		while ((line = reader.readLine()) != null) {
+			System.out.println("Processing log line: " + line);
+			String[] parts = line.split(" ");
+
+			if (parts.length < 2) {
+				System.err.println("Invalid log line format: " + line);
+				continue;
+			}
+
+			try {
+				int id = Integer.parseInt(parts[0]);
+				float value = Float.parseFloat(parts[1]);
+
+				switch (id) {
+					case 1:
+						this.accountService.addAmount(value, false);
+						System.out.println("Add poziv");
+						break;
+					case 2:
+						this.accountService.witdrawAmount(value, false);
+						System.out.println("Withdraw poziv");
+						break;
+					default:
+						System.out.println("Unknown operation ID: " + id);
+						break;
+				}
+			} catch (NumberFormatException | ArrayIndexOutOfBoundsException e) {
+				System.err.println("Error processing log line: " + line + ". " + e.getMessage());
+				continue;
+			}
+
+		}
+		System.out.println("Loaded from log file: " + logFileName);
+	} catch (IOException e) {
+		throw new RuntimeException(e);
+	}
+}
+
 	@Override
 	public void run() {
 		while(running) {
@@ -220,43 +294,53 @@ public class AppServer extends SyncPrimitive implements Runnable, ReplicatedLog.
 	public static void main(String[] args) throws IOException, InterruptedException {
 
 		if (args.length != 3) {
-			System.out.println("Usage java -cp PDS-FT1-1.0.jar;.;lib/* rs.raf.pds.faulttolerance.AppServer <zookeeper_server_host:port> <gRPC_port> <log_file_name>");
+			System.out.println("Usage java -cp PDS-FT1-1.0.jar:lib/* rs.raf.pds.faulttolerance.AppServer <zookeeper_server_host:port> <gRPC_port> <log_file_name>");
 			System.exit(1);
 		}
 
 		String zkConnectionString = args[0];
 		int gRPCPort = Integer.parseInt(args[1]);
 		String logFileName = args[2];
+		String logDirectory = "/home/marko/Documents/GitHub/Zookeper-java/LogFiles/";
 
-		String myGRPCaddress = InetAddress.getLocalHost().getHostName()+":"+gRPCPort;
+		String myGRPCaddress = InetAddress.getLocalHost().getHostName() + ":" + gRPCPort;
 		AppServer node = new AppServer(zkConnectionString, APP_ROOT_NODE, myGRPCaddress);
-		ReplicatedLog replicatedLog = new ReplicatedLog(logFileName, node);
+		ReplicatedLog replicatedLog = new ReplicatedLog(logDirectory + logFileName, node);
+		AccountService accountService = new AccountService(replicatedLog);
+		node.setAccountService(accountService);
 
-		AccountService accService = new AccountService(replicatedLog);
-		node.setAccountService(accService);
+		if (node.isLeader()) {
+			for (String followerAddress : followersChannelMap.keySet()) {
+				sendLogs(followerAddress, logDirectory + logFileName);
+			}
+		}
 
-		Server gRPCServer = ServerBuilder
-				.forPort(gRPCPort)
-				.addService(new AccountServiceGRPCServer(accService, node)).build();
+		Server gRPCServer = ServerBuilder.forPort(gRPCPort)
+				.addService(new AccountServiceGRPCServer(accountService, node)).build();
 
 		gRPCServer.start();
 
-
-		try{
+		try {
 			node.election();
 			node.start();
+
+			accountService.loadSnapshot();
+			replicatedLog.loadSnapshot();
+
+			node.initializeFromLog(logDirectory + logFileName);
+
+			Snapshot scheduler = new Snapshot();
+			scheduler.startSnapshot(accountService, replicatedLog, 1, TimeUnit.MINUTES, logDirectory + logFileName);
 
 			gRPCServer.awaitTermination();
 
 			node.stop();
+			accountService.takeSnapshot();
 
-		} catch (KeeperException e){
-
-		} catch (InterruptedException e){
-
+		} catch (KeeperException | InterruptedException e) {
+			e.printStackTrace();
 		}
 
 	}
-
 
 }

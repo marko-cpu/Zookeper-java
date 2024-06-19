@@ -1,10 +1,6 @@
 package rs.raf.pds.faulttolerance;
 
-import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
-import java.io.DataOutputStream;
-import java.io.IOException;
-import java.io.DataInputStream;
+import java.io.*;
 import java.util.Scanner;
 
 import rs.raf.pds.faulttolerance.commands.AddValueCommand;
@@ -126,6 +122,42 @@ public class AccountService {
 	public void setServerState(boolean isLeader) {
 		this.isLeader = isLeader;
 	}
+
+	/**
+	 * This method is used to take a snapshot of the current state of the account.
+	 * **/
+	public synchronized void takeSnapshot() {
+		String snapshotFilePath = "/home/marko/Documents/GitHub/Zookeper-java/Snapshot/accountSnapshot.ser";
+		try {
+			FileOutputStream fileOut = new FileOutputStream(snapshotFilePath);
+			ObjectOutputStream out = new ObjectOutputStream(fileOut);
+			//System.out.println(this.amount);
+			out.writeObject(this.amount);
+			out.close();
+			fileOut.close();
+			System.out.println("Snapshot saved successfully" + snapshotFilePath);
+		} catch (IOException i) {
+			i.printStackTrace();
+		}
+	}
+
+	/**
+	 * This method is used to load a snapshot of the current state of the account.
+	 * **/
+	public void loadSnapshot() {
+		String snapshotFilePath = "/home/marko/Documents/GitHub/Zookeper-java/Snapshot/accountSnapshot.ser";
+		try {
+			FileInputStream fileIn = new FileInputStream(snapshotFilePath);
+			ObjectInputStream in = new ObjectInputStream(fileIn);
+			this.amount = (float) in.readObject();
+			System.out.println("Loaded last amount from snapshot: " + amount);
+			in.close();
+			fileIn.close();
+		} catch (IOException | ClassNotFoundException i) {
+			i.printStackTrace();
+		}
+	}
+
 
 
 }
